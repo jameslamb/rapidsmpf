@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -19,15 +20,17 @@
 #include <cudf/io/parquet.hpp>
 #include <cudf/io/types.hpp>
 #include <cudf/types.hpp>
+#include <rmm/detail/format.hpp>
 #include <rmm/mr/cuda_async_memory_resource.hpp>
 
+#include <rapidsmpf/memory/memory_type.hpp>
 #include <rapidsmpf/nvtx.hpp>
 #include <rapidsmpf/streaming/core/channel.hpp>
 #include <rapidsmpf/streaming/core/context.hpp>
+#include <rapidsmpf/streaming/core/coro_utils.hpp>
 #include <rapidsmpf/streaming/core/node.hpp>
 #include <rapidsmpf/streaming/cudf/parquet.hpp>
 
-#include "rapidsmpf/streaming/core/coro_utils.hpp"
 #include "utils.hpp"
 
 #include <coro/when_all.hpp>
@@ -62,6 +65,7 @@ rapidsmpf::streaming::Node consume_channel_parallel(
     std::size_t num_consumers
 ) {
     rapidsmpf::streaming::ShutdownAtExit c{ch_in};
+    std::atomic<std::size_t> estimated_total_bytes{0};
     auto task = [&]() -> rapidsmpf::streaming::Node {
         co_await ctx->executor()->schedule();
         while (true) {
@@ -80,6 +84,9 @@ rapidsmpf::streaming::Node consume_channel_parallel(
                     chunk.table_view().num_columns(),
                     " columns"
                 );
+                estimated_total_bytes.fetch_add(
+                    chunk.data_alloc_size(rapidsmpf::MemoryType::DEVICE)
+                );
             }
         }
     };
@@ -88,6 +95,9 @@ rapidsmpf::streaming::Node consume_channel_parallel(
         tasks.push_back(task());
     }
     rapidsmpf::streaming::coro_results(co_await coro::when_all(std::move(tasks)));
+    ctx->comm()->logger().print(
+        "Table was around ", rmm::detail::format_bytes(estimated_total_bytes.load())
+    );
 }
 
 ///< @brief Configuration options for the benchmark
